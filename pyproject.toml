@@ -41,17 +41,41 @@ dependencies = [
     "peft==0.11.1",
     "protobuf",
     "rich",
-    "sentencepiece==0.1.99",
+    # sentencepiece: bumped from 0.1.99, which has no aarch64 wheel for Python >= 3.12 (only
+    # manylinux2010_x86_64 / macOS). 0.2.0 is the first release with an aarch64 cp312 wheel.
+    "sentencepiece>=0.2.0",
     "timm==0.9.10",
-    "tokenizers==0.19.1",
-    "torch==2.2.0",
-    "torchvision==0.17.0",
-    "torchaudio==2.2.0",
-    "transformers==4.40.1",
+    # tokenizers: version left to `transformers` to resolve -- pinning it independently risks
+    # a resolver conflict against whatever transformers==4.46.3 (below) actually requires.
+    "tokenizers",
+    # torch/torchvision/torchaudio: deliberately UNPINNED here, not merely relaxed. On the
+    # air-gapped Grace/Blackwell (sm_100) image these come from the NGC base image under a
+    # non-PyPI local version string (e.g. `2.10.0a0+b4e4ee81d3`) -- see docker/Dockerfile and
+    # docker/constraints.txt. A version pin here (even a relaxed one, e.g. torch>=2.2) would
+    # make `pip install -e .` attempt to satisfy it from PyPI and silently replace the NGC
+    # build, which has no sm_100 kernels. The stock x86/A100 install flow in the README pins
+    # these explicitly at install time instead: `pip install torch==2.2.0 torchvision==0.17.0
+    # torchaudio==2.2.0 --index-url ...` runs BEFORE `pip install -e .`, and an unpinned
+    # dependency here does not disturb an already-satisfied install.
+    "torch",
+    "torchvision",
+    "torchaudio",
+    # transformers: bumped from 4.40.1, which was never validated against torch >= 2.10 /
+    # CUDA 13.x. 4.46.3 is a deliberate choice, not "latest" -- see docker/constraints.txt for
+    # the reasoning. This needs the Phase 1 logits regression test (docs/airgap-vla-plan.md)
+    # to confirm modeling_prismatic.py still round-trips correctly at this version.
+    "transformers==4.46.3",
     "wandb",
-    "tensorflow==2.15.0",
-    "tensorflow_datasets==4.9.3",
-    "tensorflow_graphics==2021.12.3",
+    # tensorflow: bumped from 2.15.0, which has NO Python-3.12 aarch64 wheel under any
+    # package name (`tensorflow`/`tensorflow-cpu` never published aarch64 wheels at all; the
+    # AWS-maintained `tensorflow-cpu-aws` fork that aarch64 installs used to resolve to
+    # stopped publishing after 2.15.1, cp39-cp311 only). From 2.16 onward, `tensorflow` on
+    # PyPI ships official aarch64 wheels directly AND is CPU-only by default (GPU support
+    # requires the `tensorflow[and-cuda]` extra, which is not used here) -- which is exactly
+    # what the RLDS pipeline needs; see prismatic/vla/datasets/rlds/dataset.py, which already
+    # disables GPU visibility for TF at import time regardless of platform.
+    "tensorflow==2.19.1",
+    "tensorflow_datasets==4.9.10",
     "dlimp @ git+https://github.com/moojink/dlimp_openvla"
 ]
 
@@ -66,6 +90,14 @@ dev = [
 sagemaker = [
     "boto3",
     "sagemaker"
+]
+# tensorflow_graphics is required only by the DROID dataset transform
+# (prismatic/vla/datasets/rlds/oxe/utils/droid_utils.py), which is excluded from the Tier-1/2
+# air-gapped data mixtures (see docs/airgap-vla-plan.md Section 6). It is unmaintained
+# (last released 2021) and its aarch64 wheel availability is unverified -- kept optional
+# rather than a required dependency so it cannot block the base image build.
+droid = [
+    "tensorflow_graphics==2021.12.3",
 ]
 
 [project.urls]

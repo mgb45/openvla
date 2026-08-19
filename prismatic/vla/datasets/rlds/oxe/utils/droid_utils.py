@@ -3,18 +3,33 @@
 from typing import Any, Dict
 
 import tensorflow as tf
-import tensorflow_graphics.geometry.transformation as tfg
+
+# `tensorflow_graphics` is an optional dependency (`pip install openvla[droid]`) -- it is
+# unmaintained and its aarch64 wheel availability is unverified, so it must not be a
+# module-level import here. This file is imported unconditionally by
+# prismatic/vla/datasets/rlds/oxe/configs.py and transforms.py (for `zero_action_filter` and
+# the non-wrist-frame transforms below, none of which need it), so a hard import at module
+# scope would break every mixture, not just DROID's wrist-frame variant.
+#
+# Only `rmat_to_euler` / `euler_to_rmat` / `invert_rmat` (and, transitively,
+# `droid_wristact_transform`) actually need it -- deferred into those three functions instead.
 
 
 def rmat_to_euler(rot_mat):
+    import tensorflow_graphics.geometry.transformation as tfg
+
     return tfg.euler.from_rotation_matrix(rot_mat)
 
 
 def euler_to_rmat(euler):
+    import tensorflow_graphics.geometry.transformation as tfg
+
     return tfg.rotation_matrix_3d.from_euler(euler)
 
 
 def invert_rmat(rot_mat):
+    import tensorflow_graphics.geometry.transformation as tfg
+
     return tfg.rotation_matrix_3d.inverse(rot_mat)
 
 

@@ -1,0 +1,16 @@
+.git
+.github
+**/__pycache__
+**/*.pyc
+*.egg-info
+.pytest_cache
+.ruff_cache
+runs/
+datasets/
+adapter-tmp/
+docs/
+.vscode
+.idea
+
+# NOTE: do not exclude README.md -- pyproject.toml's `readme = "README.md"` is read by
+# setuptools during `pip install -e .`; excluding it fails the build inside the image.

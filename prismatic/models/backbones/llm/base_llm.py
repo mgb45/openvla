@@ -12,6 +12,7 @@ We make this assumption to keep the LLM handling in this codebase relatively lig
 utilities around different types of decoding/generation strategies.
 """
 
+import os
 import warnings
 from abc import ABC, abstractmethod
 from functools import partial
@@ -97,6 +98,37 @@ class LLMBackbone(nn.Module, ABC):
         return self.tokenizer.pad_token_id
 
 
+def _resolve_attn_implementation(use_flash_attention_2: bool) -> str:
+    """Resolve the attention backend for the base LLM's `from_pretrained` call.
+
+    `use_flash_attention_2=True` is the *default* in every concrete LLM backbone
+    (llama2.py, mistral.py, phi.py) -- so on a base VLM built on Llama-2 or Mistral
+    (including `prism-dinosiglip-224px+7b` and `openvla-7b`), this is a real dependency
+    on the `flash_attn` package, not an opt-in throughput tweak. HF's `from_pretrained`
+    raises an `ImportError` if flash-attention is requested but not importable.
+
+    flash-attn is not guaranteed to be present: it may not build for every combination
+    of Blackwell (sm_100) + aarch64 + CUDA/torch version an air-gapped image ends up
+    pinned to. So this auto-detects rather than trusting the flag -- use flash-attn only
+    if it was requested AND is actually importable, otherwise fall back to PyTorch's
+    native SDPA (the cuDNN backend is correct on Blackwell). Force a specific backend
+    with PRISMATIC_ATTN_IMPLEMENTATION={flash_attention_2,sdpa,eager}, e.g. to pin the
+    numerics for the Phase 1 regression test in docs/airgap-vla-plan.md.
+    """
+    forced = os.environ.get("PRISMATIC_ATTN_IMPLEMENTATION")
+    if forced:
+        return forced
+    if not use_flash_attention_2:
+        return "sdpa"
+    try:
+        import flash_attn  # noqa: F401
+
+        return "flash_attention_2"
+    except ImportError:
+        overwatch.info("`flash_attn` not importable -- falling back to `sdpa` attention", ctx_level=1)
+        return "sdpa"
+
+
 # === Abstract Base Class for Arbitrary HF Causal LLMs ===
 class HFCausalLLMBackbone(LLMBackbone, ABC):
     def __init__(
@@ -122,7 +154,7 @@ class HFCausalLLMBackbone(LLMBackbone, ABC):
             self.llm = llm_cls.from_pretrained(
                 hf_hub_path,
                 token=hf_token,
-                use_flash_attention_2=use_flash_attention_2 if not self.inference_mode else False,
+                attn_implementation=_resolve_attn_implementation(use_flash_attention_2),
                 # The following parameters are set to prevent `UserWarnings` from HF; we want greedy decoding!
                 do_sample=False,
                 temperature=1.0,

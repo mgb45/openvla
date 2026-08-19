@@ -89,9 +89,8 @@ Keep exactly one 7B run as a reference point, ideally initialised from the relea
 Consequences of that choice, all of which must be handled explicitly in the Dockerfile:
 
 - The NGC image already has torch. **Do not let `pip install -e .` pull a different one.** Strip the torch/torchvision/torchaudio pins from `pyproject.toml` and install with a `constraints.txt` that pins them to the versions already present.
-- Install **`tensorflow-cpu`**, never GPU TF. The RLDS pipeline is CPU-only and already calls `tf.config.set_visible_devices([], "GPU")` at `prismatic/vla/datasets/rlds/dataset.py:35`. A GPU TF build will fight NGC's cuDNN/cuBLAS for symbol versions.
-- On aarch64, `tensorflow` resolves to the AWS-maintained `tensorflow-cpu-aws` build. Confirm the exact version that has an aarch64 wheel for the container's Python before pinning; TF 2.15 is not guaranteed to be it.
-- Keep **`attn_implementation="sdpa"` as the default and flash-attn as an opt-in**. PyTorch SDPA with the cuDNN backend is correct on Blackwell; treat flash-attn as a throughput optimisation to enable after Phase 1 proves numerics, not as a dependency.
+- Install plain **`tensorflow`** (no `[and-cuda]` extra), never GPU TF. **This needed real verification, not the assumption originally written here.** Neither `tensorflow` nor `tensorflow-cpu` has ever published an aarch64 wheel on PyPI; on aarch64, `tensorflow` used to transitively resolve to the AWS-maintained `tensorflow-cpu-aws` fork instead — and that fork stopped publishing after 2.15.1 (cp39–cp311 only, no Python 3.12 build at all). From TensorFlow 2.16 onward this changed: the plain `tensorflow` package ships official aarch64 wheels directly, and the package became CPU-only by default — GPU support moved to the opt-in `tensorflow[and-cuda]` extra. So `tensorflow==2.19.1` is both the version line with a working aarch64+cp312 wheel *and* already CPU-only, matching what `tf.config.set_visible_devices([], "GPU")` at `prismatic/vla/datasets/rlds/dataset.py:35` expects.
+- **flash-attn turned out not to be a clean opt-in.** `LLaMa2LLMBackbone`/`MistralLLMBackbone`/`PhiLLMBackbone` (`prismatic/models/backbones/llm/{llama2,mistral,phi}.py`) all default `use_flash_attention_2=True`, which HF's `from_pretrained` turns into a hard `ImportError` if `flash_attn` isn't installed — a real dependency for any Llama-2/Mistral-backed training, including `openvla-7b` and `prism-dinosiglip-224px+7b`, not a throughput knob. Fixed with an auto-fallback resolver (`_resolve_attn_implementation` in `base_llm.py`, §5.7) that uses flash-attn only if it's actually importable and falls back to `sdpa` otherwise — correct on Blackwell via the cuDNN backend, just slower. Override with `PRISMATIC_ATTN_IMPLEMENTATION` to force a specific backend for the Phase 1 numerics test.
 
 ### Image transfer
 
@@ -133,7 +132,7 @@ Prove the RLDS pipeline works offline on aarch64 and that Blackwell numerics mat
 Work items:
 
 - Ingest **Tier 1** data (§6) and the `openvla-7b` HF checkpoint.
-- New VLA configs for world sizes 4 and 8 (§5.3).
+- New VLA configs for world sizes 4 and 8 (§5.4).
 - Numerics regression test: a stored set of (image, instruction) → logits reference computed on a known-good x86/Ampere machine outside the airlock, ingested as a small `.npz`. Assert max abs deviation on the action-token logits is within bf16 tolerance.
 - LoRA fine-tune of `openvla-7b` on `bridge_orig` via `vla-scripts/finetune.py` for ~5k steps.
 
@@ -184,68 +183,63 @@ Cut the seam now, use it later. See §9.
 
 ## 5. Code changes, file by file
 
-### 5.1 `docker/Dockerfile` (new)
+### 5.1 `docker/Dockerfile` — **implemented**, CI build not yet run
 
-Sketch — versions to be pinned against whatever NGC tag CI resolves:
+Base: `nvcr.io/nvidia/pytorch:25.12-py3` (torch `2.10.0a0+b4e4ee81d3`, CUDA 13.1.0, Python 3.12, Ubuntu 24.04 — documented to publish an arm64 manifest for Grace systems and Blackwell-optimized since the 25.01 release).
+
+The torch-pin problem turned out to be sharper than "pin it in a constraints file": NGC's torch build carries a non-PyPI local version string (`2.10.0a0+b4e4ee81d3`), which cannot be expressed as a normal pip version constraint. A constraints file only limits versions pip is *already* going to install for some other reason — it does not stop a package listed directly in `dependencies` from being installed. Since `pyproject.toml` listed `torch==2.2.0` directly, `pip install -e .` would have silently reinstalled that real, resolvable, wrong-for-Blackwell version over the NGC build regardless of any constraints file. The actual fix was in `pyproject.toml` (§5.3): remove the pin entirely, not relax it.
 
 ```dockerfile
-ARG NGC_TAG=25.10-py3
+ARG NGC_TAG=25.12-py3
 FROM nvcr.io/nvidia/pytorch:${NGC_TAG}
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    HF_HUB_OFFLINE=1 \
-    TRANSFORMERS_OFFLINE=1 \
-    WANDB_MODE=offline \
-    TOKENIZERS_PARALLELISM=false \
-    TF_CPP_MIN_LOG_LEVEL=3 \
-    PYTHONUNBUFFERED=1
+ENV HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 WANDB_MODE=offline \
+    TOKENIZERS_PARALLELISM=false TF_CPP_MIN_LOG_LEVEL=3 PYTHONUNBUFFERED=1
 
 WORKDIR /opt/openvla
-COPY docker/constraints.txt /tmp/constraints.txt
 
-# CPU-only TF: the RLDS pipeline never touches the GPU.
-RUN pip install --no-cache-dir -c /tmp/constraints.txt \
-      "tensorflow-cpu" "tensorflow_datasets" "dlimp @ git+https://github.com/moojink/dlimp_openvla"
+# Capture what the base image actually shipped -- this is the real protection mechanism,
+# not a hand-written pin. If some *other* dependency later declares a torch version bound
+# the installed build doesn't satisfy, this makes pip fail loudly here, in CI, instead of
+# silently upgrading torch on the cluster three weeks from now.
+RUN python -m pip freeze | grep -Ei '^(torch|torchvision|torchaudio|numpy)==' > /tmp/base-constraints.txt
+
+COPY docker/constraints.txt /tmp/repo-constraints.txt
+RUN python -m pip install --no-cache-dir -c /tmp/base-constraints.txt -c /tmp/repo-constraints.txt \
+      tensorflow tensorflow_datasets "dlimp @ git+https://github.com/moojink/dlimp_openvla"
 
 COPY . /opt/openvla
-RUN pip install --no-cache-dir -c /tmp/constraints.txt -e .
+RUN python -m pip install --no-cache-dir -c /tmp/base-constraints.txt -c /tmp/repo-constraints.txt -e .
 
-# Fail the build, not the cluster job, if anything is missing.
-RUN python -c "import torch, tensorflow as tf, transformers, timm, draccus; \
-               print(torch.__version__, torch.version.cuda, tf.__version__)" \
- && python -c "from prismatic.vla.datasets import RLDSDataset; print('rlds ok')"
+# Build-time self-check: fail the build, not the cluster job, if anything is missing --
+# including whether flash-attn actually resolved, which is now known to be load-bearing.
+RUN python - <<'PYCHECK'
+import torch, tensorflow as tf, transformers, timm
+from prismatic.vla.datasets import RLDSDataset
+from prismatic.models.backbones.llm.base_llm import _resolve_attn_implementation
+assert len(tf.config.list_physical_devices("GPU")) == 0, "TensorFlow must stay CPU-only"
+print("attn backend:", _resolve_attn_implementation(use_flash_attention_2=True))
+PYCHECK
 ```
 
-`docker/constraints.txt` pins torch/torchvision/torchaudio to the versions already inside the NGC image, so `pip install -e .` cannot replace them.
+Full file: [`docker/Dockerfile`](../docker/Dockerfile). Also added [`.dockerignore`](../.dockerignore) — catching, in the process, that a naive blanket `*.md` exclusion would have deleted `README.md`, which `pyproject.toml`'s `readme=` needs at build time.
 
-### 5.2 `.github/workflows/build-image.yml` (new)
+### 5.2 `.github/workflows/build-image.yml` — **implemented**, not yet run
 
-```yaml
-on: { push: { branches: [main] }, workflow_dispatch: }
-jobs:
-  build:
-    runs-on: ubuntu-24.04-arm          # native arm64; never QEMU
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build
-        run: docker build --platform linux/arm64 -f docker/Dockerfile -t openvla:${{ github.sha }} .
-      - name: Offline smoke test
-        run: docker run --rm --network none openvla:${{ github.sha }} python -c "import prismatic; print('ok')"
-      - name: Export
-        run: docker save openvla:${{ github.sha }} | zstd -T0 -19 -o openvla-${{ github.sha }}.tar.zst
-      - uses: actions/upload-artifact@v4
-        with: { name: image, path: openvla-*.tar.zst }
-```
+Native `ubuntu-24.04-arm` (never QEMU — compiling anything under emulation blows the job's time budget). Builds, then an `--network none` smoke test that imports `prismatic`, `RLDSDataset`, and the new attention-fallback resolver with zero network access — the gate that catches a lazy HF-hub or TFDS-checksum fetch before it costs a cluster slot — then exports a `.tar.zst` artifact. Full file: [`.github/workflows/build-image.yml`](../.github/workflows/build-image.yml).
 
-The `--network none` step is the gate that catches lazy HF-hub or TFDS-checksum fetches before they cost a cluster slot.
+**Honest status:** there is no Docker daemon available in the environment this was written in, so nothing above has actually been build-tested end to end — only statically checked (YAML parses, Dockerfile heredoc delimiters balance, the import chain was traced by hand with `ast` to confirm no module-level `tensorflow_graphics` import survives — see §5.3). Getting this workflow green is the literal Phase 0 gate.
 
-### 5.3 `pyproject.toml`
+### 5.3 `pyproject.toml` — **done**
 
-- Remove `torch==2.2.0`, `torchvision==0.17.0`, `torchaudio==2.2.0` pins (supplied by the base image).
-- Change `tensorflow==2.15.0` → `tensorflow-cpu` with a version resolved from aarch64 wheel availability.
-- Move `tensorflow_graphics` to an optional extra. It is imported lazily at three of four sites already; the fourth, `prismatic/vla/datasets/rlds/oxe/utils/droid_utils.py:6`, is module-level. Make it lazy and DROID becomes optional — which it should be anyway, since DROID is excluded from the initial data tiers.
-- Relax `transformers==4.40.1` to a tested range; the numerics regression test in Phase 1 is what makes this safe.
-- Remove `wandb` from the required set, or keep it but never initialise it online.
+- Removed the `torch`/`torchvision`/`torchaudio` pins entirely, not merely relaxed (see §5.1 for why a loose pin isn't enough).
+- `tensorflow==2.15.0` → `tensorflow==2.19.1` (verified aarch64+cp312 wheel; see §3 correction above — no version of `tensorflow-cpu` works on aarch64 at all).
+- `sentencepiece==0.1.99` → `sentencepiece>=0.2.0`. The original pin also has no aarch64 wheel for Python ≥ 3.12 — found this while verifying the TF pin, not something the original plan anticipated.
+- `transformers==4.40.1` → `transformers==4.46.3`, a deliberate late-4.x choice rather than the current 5.x line, to stay on the API surface `modeling_prismatic.py` was written against. The Phase 1 logits regression test is what actually validates this.
+- `tokenizers==0.19.1` pin removed; left for `transformers` to resolve, to avoid a resolver conflict against whatever 4.46.3 actually wants.
+- `tensorflow_graphics` moved to an optional `[droid]` extra.
+
+This last change needed a follow-on fix that the original plan missed: `tensorflow_graphics` was *already* imported lazily at three sites in `transforms.py`, but `droid_utils.py`'s own import was module-level, and that module is imported unconditionally by both `configs.py` and `transforms.py` — not gated behind any DROID-specific check. Making the package optional without also fixing that would have broken `import prismatic` entirely, for every mixture, not just DROID's. Fixed by deferring the import into only the three functions (`rmat_to_euler`, `euler_to_rmat`, `invert_rmat`) that actually need it — see [`droid_utils.py`](../prismatic/vla/datasets/rlds/oxe/utils/droid_utils.py). Verified with a static AST sweep that no module-level `tensorflow_graphics` import remains anywhere under `prismatic/`.
 
 ### 5.4 `prismatic/conf/vla.py`
 
@@ -277,13 +271,15 @@ Per-device batch size is a **Phase 1 measurement**, not a guess. With 192 GB and
 - `run_vla_training` (line 245) is where the capture hook goes: at scheduled global steps, pause, run the frozen probe set through the model under `torch.no_grad()`, write the capture, resume.
 - Note `num_workers=0` on the VLA dataloader (line 264) is deliberate — tf.data owns the parallelism. On Grace (72 cores/socket) the tf.data thread pool sizing is worth a Phase-1 sweep; it is the likeliest input-bound bottleneck.
 
-### 5.7 `prismatic/models/backbones/llm/base_llm.py` — skip base LLM weight download
+### 5.7 `prismatic/models/backbones/llm/base_llm.py`
 
-On the training path (`load(..., load_for_training=True)`), `HFLLMBackbone.__init__` runs `llm_cls.from_pretrained(hf_hub_path)` and downloads the full base LLM. Those weights are then *immediately overwritten*: `PrismaticVLM.from_pretrained` calls `llm_backbone.load_state_dict(...)` with the prismatic checkpoint's own `llm_backbone` entry. The download is pure waste.
+**Done — flash-attn/sdpa fallback.** This turned out to be load-bearing for the Docker image, not a nice-to-have (see the §3 correction above): `LLaMa2LLMBackbone`/`MistralLLMBackbone`/`PhiLLMBackbone` default `use_flash_attention_2=True`, which is a hard dependency, not an opt-in. Added `_resolve_attn_implementation(use_flash_attention_2)`: uses flash-attn only if it's both requested and actually importable, otherwise falls back to `sdpa`; overridable via `PRISMATIC_ATTN_IMPLEMENTATION` for pinning the Phase 1 regression test's numerics. Wired into the one call site that matters (`HFCausalLLMBackbone.__init__`'s `from_pretrained` call), replacing the old `use_flash_attention_2=...` kwarg with `attn_implementation=_resolve_attn_implementation(...)`.
+
+**Not yet done — skip base LLM weight download.** On the training path (`load(..., load_for_training=True)`), `HFLLMBackbone.__init__` runs `llm_cls.from_pretrained(hf_hub_path)` and downloads the full base LLM. Those weights are then *immediately overwritten*: `PrismaticVLM.from_pretrained` calls `llm_backbone.load_state_dict(...)` with the prismatic checkpoint's own `llm_backbone` entry. The download is pure waste.
 
 The existing `inference_mode` flag already selects `_from_config` instead, but flipping it is wrong — it also sets `use_cache=True` and skips `enable_input_require_grads()`, both of which training needs. Add a separate `init_llm_weights: bool = True` that controls only the `from_pretrained` versus `_from_config` branch.
 
-Payoff: ~13 GB less ingest per LLM backbone, and — more importantly — the gated `meta-llama/Llama-2-7b-hf` repo reduces to a config and a tokenizer, about 2 MB. Note that vision backbone weights are *not* redundant in the same way: `from_pretrained` loads them only `if "vision_backbone" in model_state_dict`, so timm weights must still be staged.
+Payoff: ~13 GB less ingest per LLM backbone, and — more importantly — the gated `meta-llama/Llama-2-7b-hf` repo reduces to a config and a tokenizer, about 2 MB. Note that vision backbone weights are *not* redundant in the same way: `from_pretrained` loads them only `if "vision_backbone" in model_state_dict`, so timm weights must still be staged. Deferred rather than blocking the image: `hf_fetch.py --full-llm-weights` is the fallback until this lands.
 
 ### 5.8 New: `prismatic/analysis/`, `scripts/airgap/`
 
