@@ -59,7 +59,19 @@ COPY docker/constraints.txt /tmp/repo-constraints.txt
 # the repo copy, so it's cached across ordinary code changes.
 RUN python -m pip install --no-cache-dir \
       -c /tmp/base-constraints.txt -c /tmp/repo-constraints.txt \
-      tensorflow tensorflow_datasets "dlimp @ git+https://github.com/moojink/dlimp_openvla"
+      tensorflow tensorflow_datasets
+
+# `dlimp`'s own setup.py hard-pins `tensorflow==2.15.0` as a direct install_requires -- not a
+# loose bound a constraints file could override, an exact pin that conflicts outright with the
+# tensorflow==2.19.1 we just installed (2.15.0 has no aarch64 wheel for this image's Python at
+# all, so satisfying dlimp's pin literally isn't possible here). dlimp is a thin tf.data/tfds
+# wrapper (~8 small files, no tf.compat/deprecated API usage) with no other real dependencies
+# -- tensorflow_datasets>=4.9.2 is its only other requirement, already satisfied above -- so
+# `--no-deps` is installing it against the tensorflow we actually want, not skipping a
+# dependency it needs. This is exactly the kind of assumption the Phase 1 numerics regression
+# test (docs/airgap-vla-plan.md) exists to catch if it's wrong.
+RUN python -m pip install --no-cache-dir --no-deps \
+      "dlimp @ git+https://github.com/moojink/dlimp_openvla"
 
 COPY . /opt/openvla
 

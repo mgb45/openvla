@@ -133,6 +133,12 @@ git clone https://github.com/openvla/openvla.git
 cd openvla
 pip install -e .
 
+# Install dlimp separately, with --no-deps: its own setup.py hard-pins tensorflow==2.15.0,
+# which conflicts with the tensorflow version this repo now installs (see pyproject.toml).
+# dlimp has no other real dependencies -- this is the same fix already documented below
+# under "VLA Troubleshooting" for the `traj_map` / `DLataset` error, applied proactively.
+pip install --no-deps git+https://github.com/moojink/dlimp_openvla
+
 # Install Flash Attention 2 for training (https://github.com/Dao-AILab/flash-attention)
 #   =>> If you run into difficulty, try `pip cache remove flash_attn` first
 pip install packaging ninja

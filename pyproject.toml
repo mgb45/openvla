@@ -76,7 +76,18 @@ dependencies = [
     # disables GPU visibility for TF at import time regardless of platform.
     "tensorflow==2.19.1",
     "tensorflow_datasets==4.9.10",
-    "dlimp @ git+https://github.com/moojink/dlimp_openvla"
+    # dlimp is deliberately NOT listed here. Its own setup.py hard-pins `tensorflow==2.15.0`
+    # as a direct install_requires -- not a loose bound, an exact pin -- which now conflicts
+    # outright with the tensorflow==2.19.1 above (needed for aarch64; see comment there).
+    # `pip install -e .` would fail with a ResolutionImpossible if dlimp were listed here.
+    # This project's own README (see the Troubleshooting section) already documents the fix
+    # for this exact class of conflict: install dlimp separately with `--no-deps`, since it
+    # is a thin tf.data/tfds wrapper with no other real dependencies
+    # (tensorflow_datasets>=4.9.2 is its only other requirement, satisfied above).
+    #
+    #   pip install --no-deps git+https://github.com/moojink/dlimp_openvla
+    #
+    # docker/Dockerfile does this as its own explicit build step.
 ]
 
 [project.optional-dependencies]
