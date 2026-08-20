@@ -26,6 +26,18 @@
 tensorflow==2.19.1
 tensorflow_datasets==4.9.10
 
+# tensorflow_datasets pulls in tensorflow-metadata unpinned. Left alone it resolves to the
+# latest release (1.21.0+), whose generated protobuf code was compiled with protoc 6.31.1 and
+# asserts on that at import time (`ValidateProtobufRuntimeVersion`) -- but tensorflow==2.19.1
+# caps `protobuf<6.0.0dev`, so no protobuf version can satisfy both at once: pip's resolver
+# doesn't catch this because tensorflow-metadata's own declared lower bound (protobuf>=4.25.2)
+# is looser than what its actual gencode requires, so the conflict only surfaces as a runtime
+# ImportError, not a resolution failure -- which is exactly what broke the CI build. 1.17.3 is
+# the newest release still using the older gencode style (verified by downloading the wheel
+# and checking for the `ValidateProtobufRuntimeVersion` call -- absent here, present from
+# 1.21.0 on), so it actually works with protobuf < 6.
+tensorflow_metadata==1.17.3
+
 # --- sentencepiece: the original pin has no aarch64 wheel at all for a modern Python ----------
 # 0.1.99's aarch64 builds stop at manylinux2010_x86_64 / macOS; 0.2.0 is the first release
 # with an aarch64 cp312 wheel.

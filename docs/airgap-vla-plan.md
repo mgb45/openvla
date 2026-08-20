@@ -173,7 +173,7 @@ The registry contains exactly one clean comparison, and it is worth using precis
 
 **`prism-dinosiglip-224px+7b` does not belong in this set.** It is the OpenVLA base and the obvious thing to reach for, but it uses Llama-2 7B rather than Vicuña, so including it as a fifth arm confounds vision backbone with language model. Keep it as a reference point, reported separately. The same applies to `phi-2+3b`, which is both a different LLM and 336px — a useful cheap workhorse, but its own axis.
 
-Every one of these must be in the Phase-0/1 ingest. They are 13.5 GB each, 54 GB for the set — trivial next to the data, and impossible to add later without another airlock crossing. This is the single most important reason to over-provision ingest early.
+Every one of these must be in the Phase-0/1 ingest. **Measured 2026-08-20** (previously estimated at 13.5 GB each, 54 GB for the set): each is actually **25.2 GB**, ~101 GB for the four checkpoints plus ~14 GB of matching timm vision-backbone weights, **115.0 GB total** for the `sweep` profile end to end (`scripts/airgap/hf_fetch.py fetch --profile sweep`, `verify` confirmed offline-sufficient). Still small next to the data, and still impossible to add later without another airlock crossing — the correction changes the number, not the conclusion.
 
 ### Phase 4 — Head modularity (target: later)
 
