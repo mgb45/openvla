@@ -1,0 +1,58 @@
+# Constraints applied via `pip install -c docker/constraints.txt` when building the training
+# image (see docker/Dockerfile). This file pins the packages where the original repo pin is
+# either broken on aarch64 or needs a deliberate choice for the Blackwell/Grace port.
+# Everything else resolves normally from pyproject.toml.
+#
+# Every pin below was checked against PyPI on 2026-08-19 for two things: does it publish an
+# aarch64 wheel for the image's Python (3.12), and is the resulting API close enough to what
+# prismatic/extern/hf/modeling_prismatic.py expects to be worth trying first. "Worth trying
+# first" is exactly what the Phase 1 logits regression test (docs/airgap-vla-plan.md) exists
+# to confirm -- these are reasoned starting points, not guarantees.
+
+# --- TensorFlow: the RLDS input pipeline, CPU-only --------------------------------------------
+# The original pin, tensorflow==2.15.0, has NO Python-3.12 aarch64 wheel under any package
+# name. Neither `tensorflow` nor `tensorflow-cpu` has ever published aarch64 wheels on PyPI;
+# on aarch64, `tensorflow` transitively resolves to the AWS-maintained `tensorflow-cpu-aws`
+# fork instead -- and that fork stopped publishing after 2.15.1, which only has cp39/cp310/
+# cp311 wheels. There is no path to TF 2.15 on aarch64 + Python 3.12.
+#
+# From TensorFlow 2.16 onward the story is different: the plain `tensorflow` package on PyPI
+# ships official manylinux2014_aarch64 wheels directly, AND the package became CPU-only by
+# default -- GPU support moved to the `tensorflow[and-cuda]` extra, which we deliberately do
+# NOT install. So `tensorflow==2.19.1` is simultaneously the version line with a working
+# aarch64+cp312 wheel AND already CPU-only, matching what
+# prismatic/vla/datasets/rlds/dataset.py already assumes when it calls
+# `tf.config.set_visible_devices([], "GPU")`.
+tensorflow==2.19.1
+tensorflow_datasets==4.9.10
+
+# tensorflow_datasets pulls in tensorflow-metadata unpinned. Left alone it resolves to the
+# latest release (1.21.0+), whose generated protobuf code was compiled with protoc 6.31.1 and
+# asserts on that at import time (`ValidateProtobufRuntimeVersion`) -- but tensorflow==2.19.1
+# caps `protobuf<6.0.0dev`, so no protobuf version can satisfy both at once: pip's resolver
+# doesn't catch this because tensorflow-metadata's own declared lower bound (protobuf>=4.25.2)
+# is looser than what its actual gencode requires, so the conflict only surfaces as a runtime
+# ImportError, not a resolution failure -- which is exactly what broke the CI build. 1.17.3 is
+# the newest release still using the older gencode style (verified by downloading the wheel
+# and checking for the `ValidateProtobufRuntimeVersion` call -- absent here, present from
+# 1.21.0 on), so it actually works with protobuf < 6.
+tensorflow_metadata==1.17.3
+
+# --- sentencepiece: the original pin has no aarch64 wheel at all for a modern Python ----------
+# 0.1.99's aarch64 builds stop at manylinux2010_x86_64 / macOS; 0.2.0 is the first release
+# with an aarch64 cp312 wheel.
+sentencepiece==0.2.0
+
+# --- transformers: deliberately NOT the newest release -----------------------------------------
+# The repo's custom modeling code (prismatic/extern/hf/modeling_prismatic.py) was written
+# against the 4.40.x API. The current release line is 5.x, and jumping straight there risks
+# real breakage (config/registration API changes) that would only surface at runtime. 4.46.3
+# is late enough for solid torch-2.10 / SDPA support and old enough to stay on the API surface
+# the custom modeling code assumes.
+transformers==4.46.3
+
+# NOTE: torch / torchvision / torchaudio are deliberately absent from this file. They ship
+# with the NGC base image under a non-PyPI local version string (e.g.
+# `2.10.0a0+b4e4ee81d3`), which is captured dynamically at build time into
+# /tmp/base-constraints.txt -- see docker/Dockerfile. Do not add them here; a hand-written
+# pin here would not match the installed version string and would make pip try to reinstall.

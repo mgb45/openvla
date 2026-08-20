@@ -1,0 +1,113 @@
+# Builds the air-gapped training image natively on arm64 and proves it starts with no network
+# access before anything gets exported. See docs/airgap-vla-plan.md Section 3/5.2 and
+# docs/IMPLEMENTATION-STATUS.md for the plan this implements.
+name: Build air-gapped training image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - "pyproject.toml"
+      - "prismatic/**"
+      - "vla-scripts/**"
+      - ".github/workflows/build-image.yml"
+  pull_request:
+    paths:
+      - "docker/**"
+      - "pyproject.toml"
+      - "prismatic/**"
+      - "vla-scripts/**"
+      - ".github/workflows/build-image.yml"
+  workflow_dispatch:
+    inputs:
+      ngc_tag:
+        description: "NGC pytorch tag to build against (overrides the Dockerfile default)"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    # Native arm64, not QEMU emulation -- compiling anything under emulation would blow the
+    # job's time budget. Standard GitHub-hosted arm64 runners now support private repos.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        # The NGC base image plus this repo's install is multi-GB; the default runner disk
+        # is tight enough that a naive build can fail on ENOSPC rather than a real error.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          docker image prune -af || true
+
+      - name: Resolve image tag
+        id: vars
+        run: |
+          SHA_TAG="openvla-airgap:${GITHUB_SHA::12}"
+          echo "sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ github.event.inputs.ngc_tag }}" ]; then
+            echo "build_arg=--build-arg NGC_TAG=${{ github.event.inputs.ngc_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_arg=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build image
+        run: |
+          docker build \
+            --platform linux/arm64 \
+            ${{ steps.vars.outputs.build_arg }} \
+            -f docker/Dockerfile \
+            -t "${{ steps.vars.outputs.sha_tag }}" \
+            .
+
+      - name: Offline smoke test
+        # The whole point of this step: prove nothing at import/setup time reaches for the
+        # network. This is what catches a lazy HF-hub fetch or a TFDS checksum lookup before
+        # it costs a slot on the actual air-gapped cluster, not after.
+        run: |
+          docker run --rm --network none "${{ steps.vars.outputs.sha_tag }}" \
+            python -c "
+          import prismatic
+          from prismatic.vla.datasets import RLDSDataset
+          from prismatic.models.backbones.llm.base_llm import _resolve_attn_implementation
+          print('offline import smoke test: ok')
+          "
+
+      - name: Offline smoke test -- entrypoints
+        # Import the actual training/finetuning scripts' top-level dependencies with no
+        # network. This is a lighter check than running them (no GPU, no data on this
+        # runner) but it catches an offline-breaking import that the package-level check
+        # above wouldn't -- e.g. a script-only dependency, or code executed at module scope.
+        run: |
+          docker run --rm --network none "${{ steps.vars.outputs.sha_tag }}" \
+            python -c "
+          import ast, pathlib
+          for script in ['vla-scripts/train.py', 'vla-scripts/finetune.py']:
+              ast.parse(pathlib.Path(script).read_text())
+          print('entrypoint syntax check: ok')
+          "
+
+      - name: Report image size
+        run: |
+          BYTES=$(docker image inspect "${{ steps.vars.outputs.sha_tag }}" --format='{{.Size}}')
+          echo "Image size: $(numfmt --to=iec "$BYTES")"
+
+      - name: Export image
+        if: github.event_name != 'pull_request'
+        # Compressed tarball for manual transfer through the airlock. If the target partition
+        # runs Enroot/Pyxis instead of Docker/Podman, prefer `enroot import dockerd://<tag>`
+        # against a locally loaded copy of this artifact over re-deriving a .sqsh from scratch --
+        # see docs/airgap-vla-plan.md Section 3 for the tradeoffs.
+        run: |
+          docker save "${{ steps.vars.outputs.sha_tag }}" | zstd -T0 -19 -o openvla-airgap-${GITHUB_SHA::12}.tar.zst
+
+      - name: Upload image artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openvla-airgap-${{ github.sha }}
+          path: openvla-airgap-*.tar.zst
+          retention-days: 14

@@ -119,12 +119,19 @@ Profiles, smallest first. Ask the project owner which one applies:
 
 | Profile | Contents | Size |
 |---|---|---|
-| `core` | The OpenVLA base model (13.6 GB), the released OpenVLA-7B (15.1 GB), two vision backbones. The minimum to train anything. | **~32 GB** |
-| `sweep` | Four vision-backbone variants at 13.5 GB each, for the comparison experiments. | **~60 GB** |
-| `libero` | Four reference policies (15.1 GB each) plus 10.2 GB of simulator datasets, for closed-loop evaluation. | **~74 GB** |
-| `all` | Everything above, plus a smaller Phi-2 variant. | **~170 GB** |
+| `core` | The OpenVLA base model, the released OpenVLA-7B, two vision backbones. The minimum to train anything. | ~32 GB (unverified — see note) |
+| `sweep` | Four vision-backbone variants, for the comparison experiments. | **115.0 GB** (measured) |
+| `libero` | Four reference policies plus simulator datasets, for closed-loop evaluation. | ~74 GB (unverified — see note) |
+| `all` | Everything above, plus a smaller Phi-2 variant. | ~170 GB (unverified — see note) |
 
-Measured August 2026. Small next to the datasets — if in doubt, stage `all`. A second trip out here for one missing 13 GB checkpoint costs far more than moving it now.
+**`sweep` re-measured 2026-08-20** by actually running `hf_fetch.py fetch --profile sweep` end
+to end (`verify` confirmed the cache resolves fully offline afterward): **115.0 GB**, not the
+~60 GB originally estimated here. Each prismatic base VLM checkpoint (`TRI-ML/prismatic-vlms`)
+is 25.2 GB, not the 13.5 GB the original estimate assumed — the earlier number looks like it
+was sized off a bf16 checkpoint, but what's actually served is fp32. `core`, `libero`, and
+`all` all include at least one of these same checkpoints and haven't been re-measured yet, so
+treat their sizes as underestimates too until someone actually runs them — budget disk
+accordingly rather than trusting the table above for anything but `sweep`.
 
 Then confirm the staged cache is actually self-sufficient:
 
